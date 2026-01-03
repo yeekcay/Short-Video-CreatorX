@@ -1,67 +1,108 @@
-# AI Short Video Creator
-Tool to automatically create short clips with a baground video and AI-generated captions.
-Can be used for YouTube Shorts, TikTok, Instagram Reels, Snapchat Spotlight.
+# Short Video Caption Creator
 
-**No API keys** are required, the videos are processed locally on your computer.
+A specialized tool for automating video captioning, featuring high-performance transcription, speaker diarization, and dynamic overlay controls.
 
+This project repurposes the OpenAI Whisper architecture (via **WhisperX**) to provide precise, word-level timestamp alignment and speaker identification, significantly outperforming standard transcription methods in speed and accuracy.
 
-## Table of Contents
-- [Example](#example-output)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Contributing](#contributing)
-- [License](#license)
-- [Attributions](ATTRIBUTIONS.md)
+## Features
 
-## Example Output
-<video width="630" height="300" src="https://github.com/user-attachments/assets/f9e787e9-8de8-48da-9303-956cd58a45f0.mp4" title="Example Output"></video>
-
-<img src="https://github.com/user-attachments/assets/86b149d3-55f2-4e74-b51f-b607a781dc22" width="200" title="Example Output - Screenshot 1"/>
-<img src="https://github.com/user-attachments/assets/0a59928f-fe80-4da9-946d-06a0ec6d1660" width="200" title="Example Output - Screenshot 2"/>
-
-## Requirements
-- Python >=3.7 - [Download Here](https://www.python.org/downloads)
-- FFmpeg - [Download Here](https://ffmpeg.org/download.html)
-- Git - [Download Here](https://git-scm.com/downloads)
-- Git LFS - [Download Here](https://docs.github.com/en/repositories/working-with-files/managing-large-files/installing-git-large-file-storage)
-
+- **High-Performance Transcription**: Utilizes `whisperx` with CTranslate2 for up to 5x faster processing than standard Whisper.
+- **Accurate Alignment**: Phoneme-based alignment ensures captions appear exactly when spoken.
+- **Speaker Diarization**: automatically detects and labels different speakers (supports adding unique colors per speaker).
+- **GPU Acceleration**: Built-in support for CUDA and NVIDIA NVENC hardware encoding for faster rendering.
+- **Flexible Composition**:
+  - **Overlay Mode**: Add captions to a background video (e.g., gameplay footage).
+  - **Caption-Only Mode**: Caption the source video directly without any background overlay.
+- **Customizable Output**:
+  - Control caption positioning (`top`, `center`, `bottom`).
+  - Font styling, sizing, and specific speaker colors configurability.
 
 ## Installation
+
+### Prerequisites
+- Python 3.10+
+- [FFmpeg](https://ffmpeg.org/download.html) (Installed and added to system PATH)
+- **Optional (for GPU support)**: NVIDIA Driver + CUDA Toolkit 11.8 or higher.
+
+### Setup
 1. Clone the repository:
-```bash
- git clone https://github.com/sw-aka/Short-Video-Creator.git
-```
+   ```bash
+   git clone https://github.com/sw-aka/Short-Video-Creator.git
+   cd Short-Video-Creator
+   ```
 
 2. Install dependencies:
-```bash
- pip install -r requirements.txt
- ```
+   ```bash
+   pip install -r requirements.txt
+   ```
+   **Critical for GPU Users**: The command above usually installs the CPU version of PyTorch by default. To enable GPU acceleration, you must uninstall `torch` and reinstall the CUDA-supported version.
+   
+   Visit [PyTorch Get Started](https://pytorch.org/get-started/locally/) to generate the correct installation command for your system (e.g., Windows + CUDA 11.8).
+   Example command:
+   ```bash
+   pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+   ```
 
 ## Usage
-1. Move MP4 main videos into ```INPUT_VIDEOS```
-2. Move MP4 background videos into ```BACKGROUND_VIDEOS```
-3. Run ```main.py```:
- ```bash
- python main.py
- ```
-4. The editted videos are saved in ```OUTPUT_VIDEOS```
 
-### Optional
-You can edit the settings in ```config.py```.
+Run the script from the command line. The tool handles single files or entire folders.
 
+### Basic Examples
 
-## Contributing
-1. Fork the repository.
-2. Create a new branch: `git checkout -b feature-name`.
-3. Make your changes.
-4. Push your branch: `git push origin feature-name`.
-5. Create a pull request.
+**Caption a single video (Caption-Only Mode):**
+```bash
+python main.py --input video.mp4
+```
 
+**Caption with a Background Video (Overlay Mode):**
+```bash
+python main.py --input video.mp4 --background background.mp4
+```
 
-## License
-This project is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International](LICENSE.md) License.
+**Change Caption Position:**
+```bash
+python main.py --input video.mp4 --caption-position top
+```
+*Options: `top`, `center`, `bottom`*
 
-## [**Attributions**](ATTRIBUTIONS.md)
+**Batch Process a Folder:**
+```bash
+python main.py --input ./my_videos --output ./completed_videos
+```
 
+### CLI Arguments
 
+| Argument | Description |
+| :--- | :--- |
+| `-i`, `--input` | Path to a video file or a folder of videos. |
+| `-b`, `--background` | Path to a background video. If omitted, the script creates a caption-only video. |
+| `-p`, `--caption-position` | Vertical position of the text (`top`, `center`, `bottom`). |
+| `-o`, `--output` | Destination folder. Default is `OUTPUT_VIDEOS`. |
+
+## Configuration
+
+Settings are managed in `config.py`.
+
+*   **Transcription:** Change `MODEL_NAME` (e.g., `base`, `small`, `large-v2`).
+*   **Performance:** Toggle `USE_GPU_ENCODING` to `True` enables NVENC.
+*   **Styling:** Adjust `FONT_SIZE`, `FONT_NAME`, and `SPEAKER_COLORS`.
+
+### Enabling Speaker Diarization
+To enable speaker detection (labelling who is speaking):
+
+1.  Obtain a **Hugging Face Access Token**.
+2.  Accept user agreements for `pyannote/segmentation-3.0` and `pyannote/speaker-diarization-3.1` on Hugging Face.
+3.  Create a `.env` file in the project root:
+    ```
+    HUGGINGFACE_TOKEN=your_token_here
+    ```
+4.  Set `ENABLE_DIARIZATION = True` in `config.py`.
+
+## troubleshooting
+
+*   **CUDA/GPU Not Found:** Ensure your `torch` installation matches your CUDA version. Run `pip list` and check for `+cu` versions.
+*   **OOM Errors:** If running out of VRAM, lower the `BATCH_SIZE` in `config.py` or switch to a smaller Whisper model.
+*   **FFmpeg Error:** Ensure `ffmpeg` is accessible in your command line/terminal.
+
+---
+*Based on the original work by [sw-aka](https://github.com/sw-aka/Short-Video-Creator).*

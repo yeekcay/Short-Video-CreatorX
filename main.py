@@ -6,13 +6,16 @@ import shutil
 import time
 import logging
 import subprocess
+import argparse
+
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import (VideoFileClip, clips_array, concatenate_videoclips,
                              ImageClip, CompositeVideoClip, VideoClip)
 from moviepy.video.fx.all import crop as moviepy_crop
-import whisper_timestamped as whisper
+import whisperx
+from whisperx.diarize import DiarizationPipeline
 
 from config import (
     BACKGROUND_VIDEOS_DIR,
@@ -28,10 +31,49 @@ from config import (
     TEXT_POSITION_PERCENT,
     MODEL_NAME,
     LANGUAGE,
-    NUM_THREADS
+    NUM_THREADS,
+    USE_BACKGROUND_VIDEO,
+    CAPTION_START_OFFSET,
+    # WhisperX settings
+    USE_WHISPERX,
+    WHISPERX_MODEL,
+    COMPUTE_TYPE,
+    BATCH_SIZE,
+    ENABLE_DIARIZATION,
+    HUGGINGFACE_TOKEN,
+    SHOW_SPEAKER_LABELS,
+    MIN_SPEAKERS,
+    MAX_SPEAKERS,
+    SPEAKER_COLORS,
+    DEFAULT_SPEAKER_COLOR,
+    USE_GPU_ENCODING,
+    VIDEO_CODEC_NVENC,
+    VIDEO_CODEC_CPU,
+    ENCODING_PRESET
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Helper Functions
+def detect_device():
+    """Detect if CUDA GPU is available, otherwise use CPU."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            logging.info("CUDA GPU detected - using GPU acceleration")
+            return "cuda"
+        else:
+            logging.info("No CUDA GPU detected - using CPU")
+            return "cpu"
+    except ImportError:
+        logging.warning("PyTorch not found - defaulting to CPU")
+        return "cpu"
+
+def get_speaker_color(speaker_id):
+    """Get color for a speaker ID, with fallback to default color."""
+    if speaker_id is None:
+        return DEFAULT_SPEAKER_COLOR
+    return SPEAKER_COLORS.get(speaker_id, DEFAULT_SPEAKER_COLOR)
 
 class VideoTools:
     # Initialize the VideoTools class with a VideoFileClip
@@ -108,16 +150,20 @@ class Tools:
 
 class BackgroudVideo:
     @staticmethod
-    def get_clip(duration: float) -> VideoFileClip:
+    def get_clip(duration: float, background_path: str = None) -> VideoFileClip:
         """
-        Retrieves a random background video clip, trims it to the specified duration,
+        Retrieves a background video clip, trims it to the specified duration,
         and crops it to the target resolution.
 
         :param duration: The desired duration of the video clip.
+        :param background_path: Optional path to a specific background video. If None, selects randomly.
         :return: A cropped and trimmed VideoFileClip object.
         """
-        # Select a random clip from the background videos directory
-        full_clip = VideoFileClip(BackgroudVideo.select_clip())
+        # Select a clip - either specified or random
+        if background_path:
+            full_clip = VideoFileClip(background_path)
+        else:
+            full_clip = VideoFileClip(BackgroudVideo.select_clip())
         
         # Trim the selected clip to the specified duration
         trimmed_clip = BackgroudVideo.trim_clip(full_clip, duration)
@@ -198,11 +244,15 @@ class VideoCreation:
     clip = None
     audio = None
     background_clip = None
+    background_path = None
+    caption_position = None
 
-    def __init__(self, clip: VideoFileClip) -> None:
+    def __init__(self, clip: VideoFileClip, background_path: str = None, caption_position: str = None) -> None:
         # Initialize the VideoCreation object with a video clip
         self.clip = clip
         self.audio = clip.audio  # Extract audio from the video clip
+        self.background_path = background_path  # Store background path for later use
+        self.caption_position = caption_position  # Store caption position for later use
 
     def __deinit__(self) -> None:
         # Clean up resources by closing video and background clips
@@ -222,51 +272,173 @@ class VideoCreation:
         return self.clip  # Return the processed video clip
 
     def create_final_clip(self):
-        # Create the final video clip with a background
-        self.background_clip = BackgroudVideo.get_clip(self.clip.duration)  # Get background video clip
+        # Create the final video clip with or without a background
+        if self.background_path or USE_BACKGROUND_VIDEO:
+            # Background mode: combine with background video
+            self.background_clip = BackgroudVideo.get_clip(self.clip.duration, self.background_path)  # Get background video clip
 
-        _, background_height = self.background_clip.size  # Get the height of the background clip
-        target_dimensions = (FULL_RESOLUTION[0], FULL_RESOLUTION[1] - background_height)  # Calculate target dimensions
-        self.clip = VideoTools(self.clip).crop(target_dimensions[0], target_dimensions[1])  # Crop the main clip
+            _, background_height = self.background_clip.size  # Get the height of the background clip
+            target_dimensions = (FULL_RESOLUTION[0], FULL_RESOLUTION[1] - background_height)  # Calculate target dimensions
+            self.clip = VideoTools(self.clip).crop(target_dimensions[0], target_dimensions[1])  # Crop the main clip
 
-        # Combine the main clip and background clip
-        self.clip = clips_array([[self.clip], [self.background_clip]])
-        return self.clip  # Return the combined clip
+            # Combine the main clip and background clip
+            self.clip = clips_array([[self.clip], [self.background_clip]])
+        else:
+            # Caption-only mode: just crop the main video to full resolution
+            self.clip = VideoTools(self.clip).crop(FULL_RESOLUTION[0], FULL_RESOLUTION[1])
+        
+        return self.clip  # Return the final clip
 
     def create_transcription(self, audio):
-        # Generate transcription from the audio
-        os.makedirs("temp", exist_ok=True)  # Create a temporary directory for audio files
-
+        """Generate transcription using WhisperX 3-stage pipeline."""
+        os.makedirs("temp", exist_ok=True)
+        
         # Create a unique file name for the audio file
         file_dir = f"temp/{time.time() * 10**20:.0f}.mp3"
-        audio.write_audiofile(file_dir, codec="mp3", verbose=False, logger=None)  # Save audio to file
-
+        audio.write_audiofile(file_dir, codec="mp3", verbose=False, logger=None)
+        
         # Wait until the audio file is created
         while not os.path.exists(file_dir):
             time.sleep(0.01)
-
-        # Load the audio file and transcribe it
-        loaded_audio = whisper.load_audio(file_dir)
-        model = whisper.load_model(MODEL_NAME, device="cpu")
-        result = whisper.transcribe(model, loaded_audio, language=LANGUAGE, verbose=None)
-
-        # Clean up the temporary audio file
+        
         try:
-            os.remove(file_dir)
-        except FileNotFoundError:
-            pass
-
-        timestamps = []  # List to hold timestamps and words
-
-        # Extract timestamps and words from the transcription result
-        for segment in result['segments']:
-            for word in segment['words']:
-                timestamps.append({
-                    'timestamp': (word['start'], word['end']),
-                    'text': word['text']
-                })
-
-        return timestamps  # Return the list of timestamps and words
+            # Detect device (GPU or CPU)
+            device = detect_device()
+            
+            # Adjust compute type based on device
+            compute_type = COMPUTE_TYPE
+            if device == "cpu" and compute_type in ["float16", "int8"]:
+                logging.warning(f"Compute type '{compute_type}' not supported on CPU, using 'float32'")
+                compute_type = "float32"
+            
+            logging.info(f"Loading WhisperX model: {WHISPERX_MODEL}")
+            
+            # STAGE 1: Transcription with faster-whisper
+            model = whisperx.load_model(
+                WHISPERX_MODEL, 
+                device=device, 
+                compute_type=compute_type,
+                language=LANGUAGE
+            )
+            
+            # Load audio
+            audio_data = whisperx.load_audio(file_dir)
+            
+            logging.info("Stage 1: Transcribing audio...")
+            result = model.transcribe(audio_data, batch_size=BATCH_SIZE)
+            
+            # Clean up model from memory if needed
+            del model
+            import gc
+            gc.collect()
+            
+            # STAGE 2: Alignment for precise word-level timestamps
+            logging.info("Stage 2: Aligning timestamps...")
+            model_a, metadata = whisperx.load_align_model(
+                language_code=result["language"], 
+                device=device
+            )
+            
+            result = whisperx.align(
+                result["segments"], 
+                model_a, 
+                metadata, 
+                audio_data, 
+                device,
+                return_char_alignments=False
+            )
+            
+            # Clean up alignment model
+            del model_a
+            gc.collect()
+            
+            # STAGE 3: Speaker Diarization (optional)
+            speaker_segments = None
+            diarization_success = False  # Track if diarization completed successfully
+            
+            if ENABLE_DIARIZATION and HUGGINGFACE_TOKEN:
+                try:
+                    logging.info("Stage 3: Identifying speakers...")
+                    diarize_model = DiarizationPipeline(
+                        use_auth_token=HUGGINGFACE_TOKEN, 
+                        device=device
+                    )
+                    
+                    # Run diarization
+                    diarize_kwargs = {}
+                    if MIN_SPEAKERS is not None:
+                        diarize_kwargs['min_speakers'] = MIN_SPEAKERS
+                    if MAX_SPEAKERS is not None:
+                        diarize_kwargs['max_speakers'] = MAX_SPEAKERS
+                    
+                    diarize_segments = diarize_model(audio_data, **diarize_kwargs)
+                    
+                    # Assign speakers to words
+                    result = whisperx.assign_word_speakers(diarize_segments, result)
+                    speaker_segments = diarize_segments
+                    
+                    # Count unique speakers from the result (after assignment)
+                    unique_speakers = set()
+                    for segment in result.get("segments", []):
+                        for word in segment.get("words", []):
+                            if "speaker" in word:
+                                unique_speakers.add(word["speaker"])
+                    
+                    if unique_speakers:
+                        logging.info(f"Detected {len(unique_speakers)} speaker(s): {', '.join(sorted(unique_speakers))}")
+                        diarization_success = True  # Mark as successful
+                    else:
+                        logging.warning("Speaker diarization completed but no speakers were assigned to words")
+                    
+                    del diarize_model
+                    gc.collect()
+                    
+                except Exception as e:
+                    logging.error(f"Speaker diarization failed: {type(e).__name__}: {e}")
+                    logging.info("Continuing without speaker detection...")
+                    diarization_success = False
+            
+            # Extract timestamps and words from the result
+            timestamps = []
+            
+            for segment in result["segments"]:
+                if "words" not in segment:
+                    continue
+                    
+                for word_info in segment["words"]:
+                    # WhisperX alignment is more accurate, so we don't need CAPTION_START_OFFSET
+                    # But we can still apply it if configured
+                    start_time = word_info.get('start', 0)
+                    end_time = word_info.get('end', start_time + 0.5)
+                    text = word_info.get('word', '').strip()
+                    # Only use speaker data if diarization completed successfully
+                    speaker = word_info.get('speaker', None) if diarization_success else None
+                    
+                    if not text:
+                        continue
+                    
+                    # Optional: Apply caption start offset if still needed
+                    if CAPTION_START_OFFSET > 0:
+                        new_start = start_time + CAPTION_START_OFFSET
+                        if new_start < end_time:
+                            start_time = new_start
+                    
+                    timestamps.append({
+                        'timestamp': (start_time, end_time),
+                        'text': text,
+                        'speaker': speaker
+                    })
+            
+            logging.info(f"Transcription complete: {len(timestamps)} words")
+            
+        finally:
+            # Clean up the temporary audio file
+            try:
+                os.remove(file_dir)
+            except FileNotFoundError:
+                pass
+        
+        return timestamps
 
     def add_captions_to_video(self, clip, timestamps):
         # Add captions to the video based on the provided timestamps
@@ -285,6 +457,7 @@ class VideoCreation:
         for pos, timestamp in enumerate(timestamps):
             start, end = timestamp["timestamp"]
             text = timestamp["text"]
+            speaker = timestamp.get("speaker", None)  # Get speaker if available
 
             # If there is a gap before the current caption, add the previous clip
             if start > previous_time and len(queued_texts) == 0:
@@ -324,7 +497,8 @@ class VideoCreation:
             clips.append(
                 self.add_text_to_video(
                     clip.subclip(full_start, end),
-                    text
+                    text,
+                    speaker  # Pass speaker info
                 )
             )
 
@@ -341,35 +515,66 @@ class VideoCreation:
 
         return clip  # Return the final clip with captions
 
-    def add_text_to_video(self, clip, text):
-        # Add text overlay to the video clip
+    def add_text_to_video(self, clip, text, speaker=None):
+        """Add text overlay to the video clip with optional speaker color."""
         text_image = self.create_text_image(
             text,
             os.path.join(FONTS_DIR, FONT_NAME),
             FONT_SIZE,
-            clip.size[0]
+            clip.size[0],
+            speaker  # Pass speaker for color selection
         )
 
         image_clip = ImageClip(np.array(text_image), duration=clip.duration)  # Create an image clip for the text
 
-        y_offset = round(FULL_RESOLUTION[1] * (TEXT_POSITION_PERCENT / 100))  # Calculate vertical position for text
+        # Calculate vertical position for text based on caption_position
+        if self.caption_position == 'top':
+            y_offset = round(FULL_RESOLUTION[1] * 0.30)
+        elif self.caption_position == 'center':
+            y_offset = round(FULL_RESOLUTION[1] * 0.50)
+        elif self.caption_position == 'bottom':
+            y_offset = round(FULL_RESOLUTION[1] * 0.70)
+        else:
+            # Smart default: bottom for caption-only, top for combined mode
+            if self.background_path or USE_BACKGROUND_VIDEO:
+                y_offset = round(FULL_RESOLUTION[1] * 0.30)  # Top for combined mode
+            else:
+                y_offset = round(FULL_RESOLUTION[1] * 0.70)  # Bottom for caption-only
+        
         clip = CompositeVideoClip([clip, image_clip.set_position((0, y_offset,))])  # Overlay text on the video
 
         return clip  # Return the video clip with text
 
-    def create_text_image(self, text, font_path, font_size, max_width):
+    def create_text_image(self, text, font_path, font_size, max_width, speaker=None):
+        """Create an image with the specified text and speaker-based color."""
+        # Add speaker label if enabled
+        if speaker and SHOW_SPEAKER_LABELS:
+            # Format speaker ID nicely (e.g., "SPEAKER_00" -> "Speaker 1")
+            speaker_num = int(speaker.split('_')[-1]) + 1 if '_' in speaker else 1
+            text = f"[Speaker {speaker_num}]: {text}"
+        
+        # Get color for this speaker
+        text_color = get_speaker_color(speaker)
+        
         # Create an image with the specified text
-        image = Image.new("RGBA", (max_width, font_size * 10), (0, 0, 0, 0))  # Create a transparent image
+        image = Image.new("RGBA", (max_width, font_size * 10), (0, 0, 0, 0))
 
-        font = ImageFont.truetype(font_path, font_size)  # Load the specified font
+        font = ImageFont.truetype(font_path, font_size)
 
-        draw = ImageDraw.Draw(image)  # Create a drawing context
+        draw = ImageDraw.Draw(image)
 
         # Get the bounding box for the text
         _, _, w, h = draw.textbbox((0, 0), text, font=font)
 
         # Draw the text on the image with stroke for better visibility
-        draw.text(((max_width - w) / 2, round(h * 0.2)), text, font=font, fill="white", stroke_width=FONT_BORDER_WEIGHT, stroke_fill='black')
+        draw.text(
+            ((max_width - w) / 2, round(h * 0.2)), 
+            text, 
+            font=font, 
+            fill=text_color,  # Use speaker-based color
+            stroke_width=FONT_BORDER_WEIGHT, 
+            stroke_fill='black'
+        )
 
         image = image.crop((0, 0, max_width, round(h * 1.6),))  # Crop the image to the desired size
 
@@ -386,7 +591,7 @@ from moviepy.editor import VideoFileClip
 INPUT_VIDEOS_DIR = 'input_videos'
 OUTPUT_VIDEOS_DIR = 'output_videos'
 
-def start_process(file_name, processes_status_dict, video_queue: multiprocessing.Queue):
+def start_process(file_name, processes_status_dict, video_queue: multiprocessing.Queue, background_path: str = None, caption_position: str = None, output_folder: str = None):
     """
     Process a video file by applying transformations and saving the output.
 
@@ -394,6 +599,9 @@ def start_process(file_name, processes_status_dict, video_queue: multiprocessing
         file_name (str): The name of the video file to process.
         processes_status_dict (dict): A dictionary to track the status of processes.
         video_queue (multiprocessing.Queue): A queue to manage video processing tasks.
+        background_path (str): Optional path to background video file.
+        caption_position (str): Optional caption position (top/center/bottom).
+        output_folder (str): Optional output folder path.
     """
     
     logging.info(f"Processing: {file_name}")  # Log the start of processing
@@ -406,29 +614,68 @@ def start_process(file_name, processes_status_dict, video_queue: multiprocessing
     processes_status_dict[process_identifier] = False
 
     # Load the input video file
-    input_video = VideoFileClip(os.path.join(INPUT_VIDEOS_DIR, file_name))
+    if os.path.exists(file_name):
+        input_path = file_name
+    else:
+        input_path = os.path.join(INPUT_VIDEOS_DIR, file_name)
+
+    input_video = VideoFileClip(input_path)
     
     # Process the video using a custom VideoCreation class
-    output_video = VideoCreation(input_video).process()
+    output_video = VideoCreation(input_video, background_path, caption_position).process()
+    
     
     logging.info(f"Saving: {file_name}")  # Log the saving process
 
-    # Define the output directory and calculate the end time for the subclip
-    output_dir = os.path.join(OUTPUT_VIDEOS_DIR, file_name)
+    # Determine output folder (use custom or default)
+    final_output_folder = output_folder if output_folder else OUTPUT_VIDEOS_DIR
+    os.makedirs(final_output_folder, exist_ok=True)
+    
+    # Generate unique filename with numbered suffix if file exists
+    base_name = os.path.splitext(os.path.basename(file_name))[0]
+    extension = os.path.splitext(file_name)[1]
+    
+    # Add _output suffix
+    base_name = f"{base_name}_output"
+    
+    output_dir = os.path.join(final_output_folder, f"{base_name}{extension}")
+    
+    # If file exists, add numbered suffix (_1, _2, _3, etc.)
+    counter = 1
+    while os.path.exists(output_dir):
+        output_dir = os.path.join(final_output_folder, f"{base_name}_{counter}{extension}")
+        counter += 1
+    
     end_time = round(((output_video.duration * 100 // output_video.fps) * output_video.fps / 100), 2)
     
     # Create a subclip of the output video
     output_video = output_video.subclip(t_end=end_time)
+
+    # Determine codec and preset
+    video_codec = VIDEO_CODEC_CPU
+    encoding_preset = ENCODING_PRESET
+    output_threads = NUM_THREADS
+    
+    if USE_GPU_ENCODING:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                video_codec = VIDEO_CODEC_NVENC
+                output_threads = None
+                logging.info("Using GPU encoding (NVENC)")
+        except:
+            pass
 
     # Attempt to save the output video, retrying up to 5 times on failure
     for pos in range(5):
         try:
             output_video.write_videofile(
                 output_dir,
-                codec="libx264",
+                codec=video_codec,
+                preset=encoding_preset,
                 audio_codec="aac",
                 fps=output_video.fps,
-                threads=NUM_THREADS,
+                threads=output_threads,
                 verbose=False,
                 logger=None
             )
@@ -496,6 +743,19 @@ def clone_respository():
 
 
 if __name__ == '__main__':
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='AI Short Video Creator - Add captions to videos')
+    parser.add_argument('--input', '-i', type=str, 
+                        help='Path to input video file. If not specified, processes all videos in INPUT_VIDEOS folder.')
+    parser.add_argument('--background', '-b', type=str, 
+                        help='Path to background video file. If not specified, caption-only mode.')
+    parser.add_argument('--caption-position', '-p', type=str, 
+                        choices=['top', 'center', 'bottom'],
+                        help='Caption position. Default: bottom for caption-only, top for combined mode.')
+    parser.add_argument('--output', '-o', type=str,
+                        help='Output folder path. Default: OUTPUT_VIDEOS folder.')
+    args = parser.parse_args()
+    
     # Clean up any temporary folders before starting
     delete_temp_folder()
     
@@ -513,8 +773,33 @@ if __name__ == '__main__':
     os.makedirs(INPUT_VIDEOS_DIR, exist_ok=True)
     os.makedirs(OUTPUT_VIDEOS_DIR, exist_ok=True)
 
-    # List all video files in the input directory
-    input_video_names = os.listdir(INPUT_VIDEOS_DIR)
+    # Determine which videos to process based on --input argument
+    # Determine which videos to process based on --input argument
+    if args.input:
+        # Check if input is a directory or file
+        if os.path.isdir(args.input):
+            # Process all valid video files in the directory
+            files = os.listdir(args.input)
+            valid_extensions = ('.mp4', '.mov', '.avi', '.mkv')
+            input_video_names = [os.path.join(args.input, f) for f in files if f.lower().endswith(valid_extensions)]
+            
+            if not input_video_names:
+                logging.error(f"No video files found in directory: {args.input}")
+                exit(1)
+                
+        elif os.path.exists(args.input):
+            # Process specific video file using provided path
+            input_video_names = [args.input]
+            
+        elif os.path.exists(os.path.join(INPUT_VIDEOS_DIR, args.input)):
+            # Check if it's in INPUT_VIDEOS folder
+            input_video_names = [args.input]
+        else:
+            logging.error(f"Input video or directory not found: {args.input}")
+            exit(1)
+    else:
+        # Process all videos in INPUT_VIDEOS folder (default)
+        input_video_names = os.listdir(INPUT_VIDEOS_DIR)
 
     # Add video file names to the queue
     for name in input_video_names:
@@ -531,7 +816,7 @@ if __name__ == '__main__':
             file_name = video_queue.get()  # Get the next video file name from the queue
 
             # Create a new process for video processing
-            p = multiprocessing.Process(target=start_process, args=(file_name, processes_status_dict, video_queue))
+            p = multiprocessing.Process(target=start_process, args=(file_name, processes_status_dict, video_queue, args.background, args.caption_position, args.output))
             p.start()  # Start the process
             processes[p.pid] = p  # Store the process in the dictionary
             num_active_processes += 1  # Increment the active process counter
