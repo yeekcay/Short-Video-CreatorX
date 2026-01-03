@@ -2,12 +2,12 @@
 
 1. **moviepy**
    - Version: 1.0.3
-   - Description: Modified to work with Pillow version 10
-   - License: MIT License (MIT License)
+   - Description: Video editing library used for composition and rendering.
+   - License: MIT License
    - Homepage: https://zulko.github.io/moviepy/
 
-2. **whisper-timestamped**
-   - Version: 1.15.4
-   - Description: Modified to set weights_only=True when loading torch model.
-   - License: GPLv3
-   - Homepage: https://github.com/linto-ai/whisper-timestamped
+2. **whisperx**
+   - Version: 3.3.1
+   - Description: Fast automatic speech recognition with word-level timestamps and speaker diarization.
+   - License: BSD-2-Clause
+   - Homepage: https://github.com/m-bain/whisperX
