@@ -27,8 +27,8 @@ This project repurposes the OpenAI Whisper architecture (via **WhisperX**) to pr
 ### Setup
 1. Clone the repository:
    ```bash
-   git clone https://github.com/sw-aka/Short-Video-Creator.git
-   cd Short-Video-Creator
+   git clone https://github.com/yeekcay/Short-Video-CreatorX.git
+   cd Short-Video-CreatorX
    ```
 
 2. Install dependencies:
