@@ -29,13 +29,11 @@ from config import (
     OUTPUT_VIDEOS_DIR,
     PERCENT_MAIN_CLIP,
     TEXT_POSITION_PERCENT,
-    MODEL_NAME,
     LANGUAGE,
     NUM_THREADS,
     USE_BACKGROUND_VIDEO,
     CAPTION_START_OFFSET,
     # WhisperX settings
-    USE_WHISPERX,
     WHISPERX_MODEL,
     COMPUTE_TYPE,
     BATCH_SIZE,
@@ -581,15 +579,7 @@ class VideoCreation:
         return image  # Return the created text image
 
 
-import os
-import time
-import shutil
-import multiprocessing
-from moviepy.editor import VideoFileClip
 
-# Constants for input and output directories
-INPUT_VIDEOS_DIR = 'input_videos'
-OUTPUT_VIDEOS_DIR = 'output_videos'
 
 def start_process(file_name, processes_status_dict, video_queue: multiprocessing.Queue, background_path: str = None, caption_position: str = None, output_folder: str = None):
     """
@@ -709,36 +699,7 @@ def delete_temp_folder():
 
 import subprocess
 
-def check_command(command):
-    try:
-        # Run the command and check if it is installed
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode == 0:
-            return result.stdout.strip()
-        else:
-            return None
-    except Exception as e:
-        return str(e)
 
-def clone_respository():
-    
-    
-    # Check for Git
-    git_version = check_command(['git', '--version'])
-    if not git_version:
-        raise Exception("Git is not installed. Git must be installed to download model.")
-
-    git_lfs_version = check_command(['git', 'lfs', 'version'])
-    if not git_lfs_version:
-        raise Exception("Git LFS is not installed. LFS is required to download model. Install Git LFS and try again.")
-        
-
-    repo_url = f'https://huggingface.co/openai/{MODEL_NAME}'
-    
-    logging.info(f"Cloning {repo_url}")
-    # Run the git clone command
-    subprocess.run(['git', 'clone', repo_url], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-    logging.info(f"Cloned {repo_url}")
     
 
 
@@ -759,11 +720,6 @@ if __name__ == '__main__':
     # Clean up any temporary folders before starting
     delete_temp_folder()
     
-    if not os.path.exists(MODEL_NAME):
-        logging.warning(f'Model {MODEL_NAME} not found.')
-        logging.info('Downloading model...')
-        clone_respository()
-        
     # Create a manager for shared data between processes
     manager = multiprocessing.Manager()
     processes_status_dict = manager.dict()  # Dictionary to track process statuses

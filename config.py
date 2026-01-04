@@ -1,7 +1,3 @@
-## Model settings
-MODEL_NAME = 'whisper-small.en'
-LANGUAGE = 'en'
-
 ## Processing settings
 MAX_NUMBER_OF_PROCESSES = 1 # The maximum number of videos which can be processed simultaneously
 NUM_THREADS = 8 # The number of threads used to save the editted video (reduce if using GPU encoding)
@@ -31,7 +27,7 @@ BACKGROUND_VIDEOS_DIR = 'BACKGROUND_VIDEOS' # Directory of the background videos
 FONTS_DIR = 'FONTS' # Directory the fonts are stored in
 
 ## WhisperX Settings
-USE_WHISPERX = True  # Set to False to use legacy whisper-timestamped (fallback)
+LANGUAGE = 'en'  # Language code for transcription (e.g., 'en', 'es', 'fr', 'de', etc.)
 WHISPERX_MODEL = 'base'  # Options: 'tiny', 'base', 'small', 'medium', 'large-v2', 'large-v3'
 COMPUTE_TYPE = 'float16'  # Options: 'float32' (CPU), 'float16' (GPU), 'int8' (GPU, lower quality but faster)
 BATCH_SIZE = 16  # Reduce if running out of GPU memory (try 8, 4, or 2)
